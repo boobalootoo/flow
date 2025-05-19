@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Flowchart Maker</title>
+  <style>
+    :root {
+      --bg-color: #fafafa;
+      --box-color: white;
+      --border-color: #007bff;
+      --text-color: black;
+    }
+
+    [data-theme="dark"] {
+      --bg-color: #1e1e1e;
+      --box-color: #2e2e2e;
+      --border-color: #00bfff;
+      --text-color: white;
+    }
+
+    body {
+      margin: 0;
+      font-family: sans-serif;
+      color: var(--text-color);
+    }
+
+    #toolbar {
+      padding: 10px;
+      background: #f0f0f0;
+      border-bottom: 1px solid #ccc;
+      display: flex;
+      gap: 10px;
+    }
+
+    button {
+      padding: 5px 10px;
+      background: var(--border-color);
+      color: white;
+      border: none;
+      cursor: pointer;
+      border-radius: 5px;
+    }
+
+    #canvas {
+      position: relative;
+      width: 100vw;
+      height: calc(100vh - 50px);
+      overflow: hidden;
+      background: var(--bg-color);
+    }
+
+    .box {
+      position: absolute;
+      width: 140px;
+      height: 60px;
+      background: var(--box-color);
+      border: 2px solid var(--border-color);
+      border-radius: 6px;
+      text-align: center;
+      line-height: 60px;
+      cursor: move;
+      user-select: none;
+      color: var(--text-color);
+    }
+
+    .box.editing {
+      outline: 2px dashed red;
+    }
+
+    svg {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+
+    .arrow {
+      stroke: var(--text-color);
+      stroke-width: 2;
+      fill: none;
+      marker-end: url(#arrowhead);
+    }
+
+    .selected {
+      box-shadow: 0 0 5px 2px red;
+    }
+  </style>
+</head>
+<body data-theme="light">
+
+<div id="toolbar">
+  <button onclick="addBox()">Add Box</button>
+  <button onclick="startConnect()">Connect</button>
+  <button onclick="exportPNG()">Export PNG</button>
+  <button onclick="exportJSON()">Export JSON</button>
+  <button onclick="importJSON()">Import JSON</button>
+  <button onclick="toggleTheme()">Toggle Theme</button>
+</div>
+
+<div id="canvas">
+  <svg id="svg-layer">
+    <defs>
+      <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5"
+              orient="auto" markerUnits="strokeWidth">
+        <polygon points="0 0, 10 3.5, 0 7" fill="var(--text-color)"/>
+      </marker>
+    </defs>
+  </svg>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+<script>
+  let boxId = 0;
+  const canvas = document.getElementById('canvas');
+  const svg = document.getElementById('svg-layer');
+  let boxes = {};
+  const connections = [];
+  let isDragging = false;
+  let connectMode = false;
+  let connectFrom = null;
+  let selectedBox = null;
+
+  const history = [];
+  const redoStack = [];
+
+  function saveState() {
+    const snapshot = {
+      boxes: JSON.stringify(Object.entries(boxes).map(([id, el]) => ({
+        id,
+        x: el.offsetLeft,
+        y: el.offsetTop,
+        text: el.textContent
+      }))),
+      connections: JSON.stringify(connections)
+    };
+    history.push(snapshot);
+    redoStack.length = 0;
+  }
+
+  function restoreState(state) {
+    canvas.innerHTML = '<svg id="svg-layer"></svg>';
+    boxId = 0;
+    boxes = {};
+    connections.length = 0;
+
+    const boxData = JSON.parse(state.boxes);
+    const connData = JSON.parse(state.connections);
+
+    boxData.forEach(b => {
+      addBox(b.x, b.y, b.text, b.id);
+      const n = Number(b.id.split('-')[1]);
+      if (n > boxId) boxId = n;
+    });
+
+    connData.forEach(c => connections.push(c));
+    updateConnections();
+  }
+
+  function undo() {
+    if (history.length > 1) {
+      const state = history.pop();
+      redoStack.push(state);
+      restoreState(history[history.length - 1]);
+    }
+  }
+
+  function redo() {
+    if (redoStack.length) {
+      const state = redoStack.pop();
+      restoreState(state);
+      history.push(state);
+    }
+  }
+
+  function addBox(x = 100, y = 100, text = 'Step', id = null) {
+    id = id || 'box-' + (++boxId);
+    const box = document.createElement('div');
+    box.className = 'box';
+    box.id = id;
+    box.textContent = text;
+    box.style.left = x + 'px';
+    box.style.top = y + 'px';
+    canvas.appendChild(box);
+    boxes[id] = box;
+
+    let offsetX, offsetY;
+    box.onmousedown = e => {
+      if (connectMode) {
+        if (!connectFrom) {
+          connectFrom = id;
+          box.style.borderColor = 'red';
+        } else {
+          if (connectFrom !== id) {
+            connectBoxes(connectFrom, id);
+            saveState();
+          }
+          boxes[connectFrom].style.borderColor = 'var(--border-color)';
+          connectFrom = null;
+        }
+        return;
+      }
+      isDragging = true;
+      offsetX = e.offsetX;
+      offsetY = e.offsetY;
+      selectedBox?.classList.remove('selected');
+      selectedBox = box;
+      box.classList.add('selected');
+      const move = e => {
+        if (isDragging) {
+          box.style.left = (e.pageX - offsetX) + 'px';
+          box.style.top = (e.pageY - offsetY - 50) + 'px';
+          updateConnections();
+        }
+      };
+      const stop = () => {
+        isDragging = false;
+        saveState();
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', stop);
+      };
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', stop);
+    };
+
+    box.ondblclick = () => {
+      box.contentEditable = true;
+      box.classList.add('editing');
+      box.focus();
+      box.onblur = () => {
+        box.contentEditable = false;
+        box.classList.remove('editing');
+        saveState();
+      };
+    };
+
+    saveState();
+  }
+
+  function connectBoxes(fromId, toId) {
+    connections.push({ from: fromId, to: toId });
+    updateConnections();
+  }
+
+  function updateConnections() {
+    svg.innerHTML = svg.querySelector('defs').outerHTML;
+    connections.forEach(conn => {
+      const from = boxes[conn.from];
+      const to = boxes[conn.to];
+      if (!from || !to) return;
+      const x1 = from.offsetLeft + from.offsetWidth / 2;
+      const y1 = from.offsetTop + from.offsetHeight / 2;
+      const x2 = to.offsetLeft + to.offsetWidth / 2;
+      const y2 = to.offsetTop + to.offsetHeight / 2;
+      const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+      line.setAttribute("x1", x1);
+      line.setAttribute("y1", y1);
+      line.setAttribute("x2", x2);
+      line.setAttribute("y2", y2);
+      line.setAttribute("class", "arrow");
+      svg.appendChild(line);
+    });
+  }
+
+  function startConnect() {
+    connectMode = !connectMode;
+    connectFrom = null;
+    Object.values(boxes).forEach(b => b.style.borderColor = 'var(--border-color)');
+  }
+
+  function exportPNG() {
+    html2canvas(canvas).then(canvasEl => {
+      const link = document.createElement('a');
+      link.download = 'flowchart.png';
+      link.href = canvasEl.toDataURL();
+      link.click();
+    });
+  }
+
+  function exportJSON() {
+    const data = {
+      boxes: Object.entries(boxes).map(([id, el]) => ({
+        id,
+        x: el.offsetLeft,
+        y: el.offsetTop,
+        text: el.textContent
+      })),
+      connections
+    };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'flowchart.json';
+    link.click();
+  }
+
+  function importJSON() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json';
+    input.onchange = e => {
+      const file = e.target.files[0];
+      const reader = new FileReader();
+      reader.onload = () => {
+        const data = JSON.parse(reader.result);
+        canvas.innerHTML = '<svg id="svg-layer"></svg>';
+        boxes = {};
+        connections.length = 0;
+        boxId = 0;
+        data.boxes.forEach(b => {
+          addBox(b.x, b.y, b.text, b.id);
+        });
+        data.connections.forEach(c => connections.push(c));
+        updateConnections();
+        saveState();
+      };
+      reader.readAsText(file);
+    };
+    input.click();
+  }
+
+  function toggleTheme() {
+    const current = document.body.getAttribute('data-theme');
+    document.body.setAttribute('data-theme', current === 'dark' ? 'light' : 'dark');
+  }
+
+  // Keyboard Shortcuts
+  document.addEventListener('keydown', e => {
+    if (e.ctrlKey && e.key === 'z') undo();
+    if (e.ctrlKey && e.key === 'y') redo();
+    if (e.key === 'Delete' && selectedBox) {
+      const id = selectedBox.id;
+      selectedBox.remove();
+      delete boxes[id];
+      const index = connections.findIndex(c => c.from === id || c.to === id);
+      if (index !== -1) connections.splice(index, 1);
+      selectedBox = null;
+      updateConnections();
+      saveState();
+    }
+  });
+
+  // Initial state
+  saveState();
+</script>
+
+</body>
+</html>
